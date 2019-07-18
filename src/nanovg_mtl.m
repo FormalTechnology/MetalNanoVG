@@ -163,6 +163,8 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 // Textures
 @property (nonatomic, strong) NSMutableArray<MNVGtexture*>* textures;
 @property int textureId;
+// Used for iosurface-backed texture creation
+@property IOSurfaceRef textureSurfaceRef;
 
 // Per frame buffers
 @property (nonatomic, assign) MNVGbuffers* buffers;
@@ -499,17 +501,25 @@ void mnvgBindFramebuffer(MNVGframebuffer* framebuffer) {
 
 MNVGframebuffer* mnvgCreateFramebuffer(NVGcontext* ctx, int width,
                                        int height, int imageFlags) {
-  MNVGframebuffer* framebuffer = \
-      (MNVGframebuffer*)malloc(sizeof(MNVGframebuffer));
-  if (framebuffer == NULL)
-    return NULL;
+    return mnvgCreateFramebufferWithIOSurface(ctx, width, height, imageFlags, NULL);
+}
 
-  memset(framebuffer, 0, sizeof(MNVGframebuffer));
-  framebuffer->image = nvgCreateImageRGBA(ctx, width, height,
-                                          imageFlags | NVG_IMAGE_PREMULTIPLIED,
-                                          NULL);
-  framebuffer->ctx = ctx;
-  return framebuffer;
+MNVGframebuffer* mnvgCreateFramebufferWithIOSurface(NVGcontext* ctx, int width,
+                                                    int height, int imageFlags, IOSurfaceRef ioSurface) {
+    MNVGframebuffer* framebuffer = \
+    (MNVGframebuffer*)malloc(sizeof(MNVGframebuffer));
+    if (framebuffer == NULL)
+        return NULL;
+    
+    MNVGcontext* mtl = (__bridge MNVGcontext*)nvgInternalParams(ctx)->userPtr;
+    mtl.textureSurfaceRef = ioSurface;
+    
+    memset(framebuffer, 0, sizeof(MNVGframebuffer));
+    framebuffer->image = nvgCreateImageRGBA(ctx, width, height,
+                                            imageFlags | NVG_IMAGE_PREMULTIPLIED,
+                                            NULL);
+    framebuffer->ctx = ctx;
+    return framebuffer;
 }
 
 void mnvgDeleteFramebuffer(MNVGframebuffer* framebuffer) {
@@ -1141,10 +1151,13 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
                         imageFlags:(int)imageFlags
                               data:(const unsigned char*)data {
   MNVGtexture* tex = [self allocTexture];
+    
+  IOSurfaceRef ioSurfaceRef = _textureSurfaceRef;
+  _textureSurfaceRef = NULL;
 
   if (tex == nil) return 0;
 
-  MTLPixelFormat pixelFormat = MTLPixelFormatRGBA8Unorm;
+  MTLPixelFormat pixelFormat = ioSurfaceRef ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
   if (type == NVG_TEXTURE_ALPHA) {
     pixelFormat = MTLPixelFormatR8Unorm;
   }
@@ -1160,8 +1173,11 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   textureDescriptor.usage = MTLTextureUsageShaderRead
                             | MTLTextureUsageRenderTarget
                             | MTLTextureUsageShaderWrite;
-  tex->tex = [_metalLayer.device newTextureWithDescriptor:textureDescriptor];
-
+  if(ioSurfaceRef) {
+      tex->tex = [_metalLayer.device newTextureWithDescriptor:textureDescriptor iosurface:ioSurfaceRef plane:0];
+  } else {
+      tex->tex = [_metalLayer.device newTextureWithDescriptor:textureDescriptor];
+  }
   if (data != NULL) {
     NSUInteger bytesPerRow;
     if (tex->type == NVG_TEXTURE_RGBA) {
@@ -1384,7 +1400,7 @@ error:
       buffers->nverts = 0;
       buffers->ncalls = 0;
       buffers->nuniforms = 0;
-      dispatch_semaphore_signal(_semaphore);
+      dispatch_semaphore_signal(self->_semaphore);
   }];
 
   if (s_framebuffer == NULL ||
@@ -1658,7 +1674,7 @@ error:
 
     // Clears stencil buffer.
     [_renderEncoder setDepthStencilState:_strokeClearStencilState];
-    [_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
+    //[_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
     [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
