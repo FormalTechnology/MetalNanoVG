@@ -123,6 +123,11 @@ fragment float4 fragmentShader(RasterizerData in [[stage_in]],
   }
 }
 
+float correctGamma(float color) {
+    const float gamma = 2.2;
+    return pow(color, (1.0/gamma));
+}
+
 // Fragment function (AA)
 fragment float4 fragmentShaderAA(RasterizerData in [[stage_in]],
                                  constant Uniforms& uniforms [[buffer(0)]],
@@ -130,8 +135,9 @@ fragment float4 fragmentShaderAA(RasterizerData in [[stage_in]],
                                  sampler sampler [[sampler(0)]]) {
   float scissor = scissorMask(uniforms, in.fpos);
   if (scissor == 0)
-    return float4(0);
+      discard_fragment();
 
+  
   if (uniforms.type == 2) {  // MNVG_SHADER_IMG
     float4 color = texture.sample(sampler, in.ftcoord);
     if (uniforms.texType == 1)
@@ -144,8 +150,10 @@ fragment float4 fragmentShaderAA(RasterizerData in [[stage_in]],
 
   float strokeAlpha = strokeMask(uniforms, in.ftcoord);
   if (strokeAlpha < uniforms.strokeThr) {
-    return float4(0);
+      discard_fragment();
   }
+    
+  //strokeAlpha = correctGamma(strokeAlpha);
 
   if (uniforms.type == 0) {  // MNVG_SHADER_FILLGRAD
     float2 pt = (uniforms.paintMat * float3(in.fpos, 1.0)).xy;
