@@ -166,6 +166,9 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 // Used for iosurface-backed texture creation
 @property IOSurfaceRef textureSurfaceRef;
 
+// Keeps the weak reference to the currently binded framebuffer.
+@property MNVGframebuffer* s_framebuffer;
+
 // Per frame buffers
 @property (nonatomic, assign) MNVGbuffers* buffers;
 @property (nonatomic, strong) NSMutableArray* cbuffers;
@@ -262,9 +265,6 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
                                pixelFormat:(MTLPixelFormat)pixelFormat;
 
 @end
-
-// Keeps the weak reference to the currently binded framebuffer.
-MNVGframebuffer* s_framebuffer = NULL;
 
 const MTLResourceOptions kMetalBufferOptions = \
     (MTLResourceCPUCacheModeWriteCombined | MTLResourceStorageModeShared);
@@ -495,8 +495,9 @@ void nvgDeleteMTL(NVGcontext* ctx) {
   nvgDeleteInternal(ctx);
 }
 
-void mnvgBindFramebuffer(MNVGframebuffer* framebuffer) {
-  s_framebuffer = framebuffer;
+void mnvgBindFramebuffer(NVGcontext* ctx, MNVGframebuffer* framebuffer) {
+    MNVGcontext* mtl = (__bridge MNVGcontext*)nvgInternalParams(ctx)->userPtr;
+    mtl.s_framebuffer = framebuffer;
 }
 
 MNVGframebuffer* mnvgCreateFramebuffer(NVGcontext* ctx, int width,
@@ -1142,6 +1143,7 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   _strokeClearStencilState = [device
       newDepthStencilStateWithDescriptor:stencilDescriptor];
 
+  _s_framebuffer = nil;
   return 1;
 }
 
@@ -1403,12 +1405,12 @@ error:
       dispatch_semaphore_signal(self->_semaphore);
   }];
 
-  if (s_framebuffer == NULL ||
-      nvgInternalParams(s_framebuffer->ctx)->userPtr != (__bridge void*)self) {
+  if (_s_framebuffer == NULL ||
+      nvgInternalParams(_s_framebuffer->ctx)->userPtr != (__bridge void*)self) {
     textureSize = _viewPortSize;
   } else {  // renders in framebuffer
-    buffers->image = s_framebuffer->image;
-    MNVGtexture* tex = [self findTexture:s_framebuffer->image];
+    buffers->image = _s_framebuffer->image;
+    MNVGtexture* tex = [self findTexture:_s_framebuffer->image];
     colorTexture = tex->tex;
     textureSize = (vector_uint2){(uint)colorTexture.width,
                                  (uint)colorTexture.height};
@@ -1446,7 +1448,7 @@ error:
 
 #if TARGET_OS_OSX == 1
   // Makes mnvgReadPixels() work as expected on Mac.
-  if (s_framebuffer != NULL) {
+  if (_s_framebuffer != NULL) {
     id<MTLBlitCommandEncoder> blitCommandEncoder = [_buffers->commandBuffer
         blitCommandEncoder];
     [blitCommandEncoder synchronizeResource:colorTexture];
