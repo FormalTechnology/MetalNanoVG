@@ -1457,6 +1457,7 @@ error:
 #endif
 
   [_buffers->commandBuffer commit];
+  [_buffers->commandBuffer waitUntilCompleted];
 }
 
 - (int)renderGetTextureSizeForImage:(int)image
