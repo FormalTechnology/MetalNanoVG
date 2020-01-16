@@ -507,6 +507,8 @@ MNVGframebuffer* mnvgCreateFramebuffer(NVGcontext* ctx, int width,
 
 MNVGframebuffer* mnvgCreateFramebufferWithIOSurface(NVGcontext* ctx, int width,
                                                     int height, int imageFlags, IOSurfaceRef ioSurface) {
+    if (width <= 0 || height <= 0) return NULL;
+
     MNVGframebuffer* framebuffer = \
     (MNVGframebuffer*)malloc(sizeof(MNVGframebuffer));
     if (framebuffer == NULL)
@@ -1152,6 +1154,8 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
                             height:(int)height
                         imageFlags:(int)imageFlags
                               data:(const unsigned char*)data {
+  if (width <= 0 || height <= 0) return 0;
+
   MNVGtexture* tex = [self allocTexture];
     
   IOSurfaceRef ioSurfaceRef = _textureSurfaceRef;
