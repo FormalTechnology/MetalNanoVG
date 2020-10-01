@@ -1758,7 +1758,8 @@ error:
 
     // Clears stencil buffer.
     [_renderEncoder setDepthStencilState:_strokeClearStencilState];
-    [_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
+    // JB: Disabling this call to fix anti-aliasing of rounded corners etc.
+    //[_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
     [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
