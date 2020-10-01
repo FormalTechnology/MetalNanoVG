@@ -29,26 +29,21 @@
 #include <stdio.h>
 #include <string.h>
 
-#import <simd/simd.h>
 #import <Metal/Metal.h>
-#include <TargetConditionals.h>
 #import <QuartzCore/QuartzCore.h>
+#import <simd/simd.h>
+#include <TargetConditionals.h>
 
 #include "nanovg.h"
 
-#if TARGET_OS_IOS == 1
-#  include "mnvg_bitcode/ios_1_0.h"
-#  include "mnvg_bitcode/ios_1_1.h"
-#  include "mnvg_bitcode/ios_1_2.h"
-#  include "mnvg_bitcode/ios_2_0.h"
-#  include "mnvg_bitcode/ios_2_1.h"
-#elif TARGET_OS_TV == 1
+#if TARGET_OS_SIMULATOR
+#  include "mnvg_bitcode/simulator.h"
+#elif TARGET_OS_IOS
+#  include "mnvg_bitcode/ios.h"
+#elif TARGET_OS_OSX
+#  include "mnvg_bitcode/macos.h"
+#elif TARGET_OS_TV
 #  include "mnvg_bitcode/tvos.h"
-#elif TARGET_OS_OSX == 1
-#  include "mnvg_bitcode/macos_1_1.h"
-#  include "mnvg_bitcode/macos_1_2.h"
-#  include "mnvg_bitcode/macos_2_0.h"
-#  include "mnvg_bitcode/macos_2_1.h"
 #else
 #  define MNVG_INVALID_TARGET
 #endif
@@ -244,7 +239,8 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
               compositeOperation:(NVGcompositeOperationState)compositeOperation
                          scissor:(NVGscissor*)scissor
                            verts:(const NVGvertex*)verts
-                          nverts:(int)nverts;
+                          nverts:(int)nverts
+                          fringe:(float)fringe;
 
 - (int)renderUpdateTextureWithImage:(int)image
                                   x:(int)x
@@ -268,6 +264,12 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 
 const MTLResourceOptions kMetalBufferOptions = \
     (MTLResourceCPUCacheModeWriteCombined | MTLResourceStorageModeShared);
+
+#if TARGET_OS_SIMULATOR
+const MTLPixelFormat kStencilFormat = MTLPixelFormatDepth32Float_Stencil8;
+#else
+const MTLPixelFormat kStencilFormat = MTLPixelFormatStencil8;
+#endif  // TARGET_OS_SIMULATOR
 
 static BOOL mtlnvg_convertBlendFuncFactor(int factor, MTLBlendFactor* result) {
   if (factor == NVG_ZERO)
@@ -401,13 +403,14 @@ static void mtlnvg__renderStroke(void* uptr, NVGpaint* paint,
 
 static void mtlnvg__renderTriangles(
     void* uptr, NVGpaint* paint, NVGcompositeOperationState compositeOperation,
-    NVGscissor* scissor, const NVGvertex* verts, int nverts) {
+    NVGscissor* scissor, const NVGvertex* verts, int nverts, float fringe) {
   MNVGcontext* mtl = (__bridge MNVGcontext*)uptr;
   [mtl renderTrianglesWithPaint:paint
              compositeOperation:compositeOperation
                         scissor:scissor
                           verts:verts
-                         nverts:nverts];
+                         nverts:nverts
+                         fringe:fringe];
 }
 
 static int mtlnvg__renderUpdateTexture(void* uptr, int image, int x, int y,
@@ -437,13 +440,10 @@ static void mtlnvg__xformToMat3x3(matrix_float3x3* m3, float* t) {
 }
 
 NVGcontext* nvgCreateMTL(void* metalLayer, int flags) {
-#if TARGET_OS_SIMULATOR == 1
-  printf("Metal is not supported for iPhone Simulator.\n");
-  return NULL;
-#elif defined(MNVG_INVALID_TARGET)
+#ifdef MNVG_INVALID_TARGET
   printf("Metal is only supported on iOS, macOS, and tvOS.\n");
   return NULL;
-#endif
+#endif  // MNVG_INVALID_TARGET
 
   NVGparams params;
   NVGcontext* ctx = NULL;
@@ -466,11 +466,11 @@ NVGcontext* nvgCreateMTL(void* metalLayer, int flags) {
   params.edgeAntiAlias = flags & NVG_ANTIALIAS ? 1 : 0;
 
   mtl.flags = flags;
-#if TARGET_OS_OSX == 1
+#if TARGET_OS_OSX || TARGET_OS_SIMULATOR
   mtl.fragSize = 256;
 #else
   mtl.fragSize = sizeof(MNVGfragUniforms);
-#endif
+#endif  // TARGET_OS_OSX
   mtl.indexSize = 4;  // MTLIndexTypeUInt32
   mtl.metalLayer = (__bridge CAMetalLayer*)metalLayer;
 
@@ -605,10 +605,50 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
     }
   }
 
+#if TARGET_OS_SIMULATOR
+  CAMetalLayer* metalLayer = mtl.metalLayer;
+  const NSUInteger kBufferSize = bytesPerRow * height;
+  id<MTLBuffer> buffer = [metalLayer.device
+      newBufferWithLength:kBufferSize
+      options:MTLResourceStorageModeShared];
+
+  id<MTLCommandBuffer> commandBuffer = [mtl.commandQueue commandBuffer];
+  id<MTLBlitCommandEncoder> blitCommandEncoder = [commandBuffer
+      blitCommandEncoder];
+  [blitCommandEncoder copyFromTexture:tex->tex
+      sourceSlice:0
+      sourceLevel:0
+      sourceOrigin:MTLOriginMake(x, y, 0)
+      sourceSize:MTLSizeMake(width, height, 1)
+      toBuffer:buffer
+      destinationOffset:0
+      destinationBytesPerRow:bytesPerRow
+      destinationBytesPerImage:kBufferSize];
+
+  [blitCommandEncoder endEncoding];
+  [commandBuffer commit];
+  [commandBuffer waitUntilCompleted];
+  memcpy(data, [buffer contents], kBufferSize);
+#else
   [tex->tex getBytes:data
          bytesPerRow:bytesPerRow
           fromRegion:MTLRegionMake2D(x, y, width, height)
          mipmapLevel:0];
+#endif  // TARGET_OS_SIMULATOR
+}
+
+enum MNVGTarget mnvgTarget() {
+#if TARGET_OS_SIMULATOR
+  return MNVG_SIMULATOR;
+#elif TARGET_OS_IOS
+  return MNVG_IOS;
+#elif TARGET_OS_OSX
+  return MNVG_MACOS;
+#elif TARGET_OS_TV
+  return MNVG_TVOS;
+#else
+  return MNVG_UNKNOWN;
+#endif
 }
 
 @implementation MNVGbuffers
@@ -922,9 +962,9 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     _metalLayer.device = device;
   }
-#if TARGET_OS_OSX == 1
+#if TARGET_OS_OSX
   _metalLayer.opaque = NO;
-#endif
+#endif  // TARGET_OS_OSX
 
   // Loads shaders from pre-compiled metal library..
   NSError* error;
@@ -937,53 +977,28 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   bool creates_pseudo_texture = false;
   unsigned char* metal_library_bitcode;
   unsigned int metal_library_bitcode_len;
-  NSOperatingSystemVersion os_version = [[NSProcessInfo processInfo]
-      operatingSystemVersion];
-#if TARGET_OS_IOS == 1
-  if (os_version.majorVersion < 8) {
-    return 0;
-  } else if (os_version.majorVersion == 8) {
+#if TARGET_OS_SIMULATOR
+  metal_library_bitcode = mnvg_bitcode_simulator;
+  metal_library_bitcode_len = mnvg_bitcode_simulator_len;
+#elif TARGET_OS_IOS
+  if (@available(iOS 10, *)) {
+  } else if (@available(iOS 8, *)) {
     creates_pseudo_texture = true;
-    metal_library_bitcode = mnvg_bitcode_ios_1_0;
-    metal_library_bitcode_len = mnvg_bitcode_ios_1_0_len;
-  } else if (os_version.majorVersion == 9) {
-    creates_pseudo_texture = true;
-    metal_library_bitcode = mnvg_bitcode_ios_1_1;
-    metal_library_bitcode_len = mnvg_bitcode_ios_1_1_len;
-  } else if (os_version.majorVersion == 10) {
-    metal_library_bitcode = mnvg_bitcode_ios_1_2;
-    metal_library_bitcode_len = mnvg_bitcode_ios_1_2_len;
-  } else if (os_version.majorVersion == 11) {
-    metal_library_bitcode = mnvg_bitcode_ios_2_0;
-    metal_library_bitcode_len = mnvg_bitcode_ios_2_0_len;
   } else {
-    metal_library_bitcode = mnvg_bitcode_ios_2_1;
-    metal_library_bitcode_len = mnvg_bitcode_ios_2_1_len;
+    return 0;
   }
-#elif TARGET_OS_TV == 1
+  metal_library_bitcode = mnvg_bitcode_ios;
+  metal_library_bitcode_len = mnvg_bitcode_ios_len;
+#elif TARGET_OS_OSX
+  if (@available(macOS 10.11, *)) {
+    metal_library_bitcode = mnvg_bitcode_macos;
+    metal_library_bitcode_len = mnvg_bitcode_macos_len;
+  } else {
+    return 0;
+  }
+#elif TARGET_OS_TV
   metal_library_bitcode = mnvg_bitcode_tvos;
   metal_library_bitcode_len = mnvg_bitcode_tvos_len;
-#elif TARGET_OS_OSX == 1
-  if (os_version.majorVersion < 10) {
-    return 0;
-  }
-  if (os_version.majorVersion == 10 && os_version.minorVersion < 11) {
-    return 0;
-  }
-  if (os_version.minorVersion == 11) {
-    metal_library_bitcode = mnvg_bitcode_macos_1_1;
-    metal_library_bitcode_len = mnvg_bitcode_macos_1_1_len;
-  } else if (os_version.minorVersion == 12) {
-    metal_library_bitcode = mnvg_bitcode_macos_1_2;
-    metal_library_bitcode_len = mnvg_bitcode_macos_1_2_len;
-  } else if (os_version.minorVersion == 13) {
-    metal_library_bitcode = mnvg_bitcode_macos_2_0;
-    metal_library_bitcode_len = mnvg_bitcode_macos_2_0_len;
-  } else {
-    metal_library_bitcode = mnvg_bitcode_macos_2_1;
-    metal_library_bitcode_len = mnvg_bitcode_macos_2_1_len;
-  }
-  creates_pseudo_texture = true;
 #endif
 
   dispatch_data_t data = dispatch_data_create(metal_library_bitcode,
@@ -1179,11 +1194,16 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
   textureDescriptor.usage = MTLTextureUsageShaderRead
                             | MTLTextureUsageRenderTarget
                             | MTLTextureUsageShaderWrite;
+#if TARGET_OS_SIMULATOR
+  textureDescriptor.storageMode = MTLStorageModePrivate;
+#endif  // TARGET_OS_SIMULATOR
+
   if(ioSurfaceRef) {
       tex->tex = [_metalLayer.device newTextureWithDescriptor:textureDescriptor iosurface:ioSurfaceRef plane:0];
   } else {
       tex->tex = [_metalLayer.device newTextureWithDescriptor:textureDescriptor];
   }
+
   if (data != NULL) {
     NSUInteger bytesPerRow;
     if (tex->type == NVG_TEXTURE_RGBA) {
@@ -1192,10 +1212,35 @@ void mnvgReadPixels(NVGcontext* ctx, int image, int x, int y, int width,
       bytesPerRow = width;
     }
 
-    [tex->tex replaceRegion:MTLRegionMake2D(0, 0, width, height)
-                mipmapLevel:0
-                  withBytes:data
-                bytesPerRow:bytesPerRow];
+    if (textureDescriptor.storageMode == MTLStorageModePrivate) {
+      const NSUInteger kBufferSize = bytesPerRow * height;
+      id<MTLBuffer> buffer = [_metalLayer.device
+          newBufferWithLength:kBufferSize
+          options:MTLResourceStorageModeShared];
+      memcpy([buffer contents], data, kBufferSize);
+
+      id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
+      id<MTLBlitCommandEncoder> blitCommandEncoder = [commandBuffer
+          blitCommandEncoder];
+      [blitCommandEncoder copyFromBuffer:buffer
+          sourceOffset:0
+          sourceBytesPerRow:bytesPerRow
+          sourceBytesPerImage:kBufferSize
+          sourceSize:MTLSizeMake(width, height, 1)
+          toTexture:tex->tex
+          destinationSlice:0
+          destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+
+      [blitCommandEncoder endEncoding];
+      [commandBuffer commit];
+      [commandBuffer waitUntilCompleted];
+    } else {
+      [tex->tex replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                  mipmapLevel:0
+                    withBytes:data
+                  bytesPerRow:bytesPerRow];
+    }
 
     if (imageFlags & NVG_IMAGE_GENERATE_MIPMAPS) {
       id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
@@ -1406,7 +1451,7 @@ error:
       buffers->nverts = 0;
       buffers->ncalls = 0;
       buffers->nuniforms = 0;
-      dispatch_semaphore_signal(self->_semaphore);
+      dispatch_semaphore_signal(self.semaphore);
   }];
 
   if (_s_framebuffer == NULL ||
@@ -1446,11 +1491,12 @@ error:
 
   [_renderEncoder endEncoding];
   _renderEncoder = nil;
-  if (drawable) {
+
+  if (drawable && !_metalLayer.presentsWithTransaction) {
     [_buffers->commandBuffer presentDrawable:drawable];
   }
 
-#if TARGET_OS_OSX == 1
+#if TARGET_OS_OSX
   // Makes mnvgReadPixels() work as expected on Mac.
   if (_s_framebuffer != NULL) {
     id<MTLBlitCommandEncoder> blitCommandEncoder = [_buffers->commandBuffer
@@ -1458,10 +1504,14 @@ error:
     [blitCommandEncoder synchronizeResource:colorTexture];
     [blitCommandEncoder endEncoding];
   }
-#endif
+#endif  // TARGET_OS_OSX
 
   [_buffers->commandBuffer commit];
-  [_buffers->commandBuffer waitUntilCompleted];
+
+  if (drawable && _metalLayer.presentsWithTransaction) {
+    [_buffers->commandBuffer waitUntilScheduled];
+    [drawable present];
+  }
 }
 
 - (int)renderGetTextureSizeForImage:(int)image
@@ -1553,7 +1603,8 @@ error:
               compositeOperation:(NVGcompositeOperationState)compositeOperation
                          scissor:(NVGscissor*)scissor
                            verts:(const NVGvertex*)verts
-                          nverts:(int)nverts {
+                          nverts:(int)nverts
+                          fringe:(float)fringe {
   MNVGcall* call = [self allocCall];
   MNVGfragUniforms* frag;
 
@@ -1579,7 +1630,7 @@ error:
                       paint:paint
                     scissor:scissor
                       width:1.0f
-                     fringe:1.0f
+                     fringe:fringe
                   strokeThr:-1.0f];
   frag->type = MNVG_SHADER_IMG;
 
@@ -1600,7 +1651,6 @@ error:
   MNVGtexture* tex = [self findTexture:image];
 
   if (tex == nil) return 0;
-  id<MTLTexture> texture = tex->tex;
 
   unsigned char* bytes;
   NSUInteger bytesPerRow;
@@ -1611,10 +1661,37 @@ error:
     bytesPerRow = tex->tex.width;
     bytes = (unsigned char*)data + y * bytesPerRow + x;
   }
+
+#if TARGET_OS_SIMULATOR
+  const NSUInteger kBufferSize = bytesPerRow * height;
+  id<MTLBuffer> buffer = [_metalLayer.device
+      newBufferWithLength:kBufferSize
+      options:MTLResourceStorageModeShared];
+  memcpy([buffer contents], bytes, kBufferSize);
+
+  id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
+  id<MTLBlitCommandEncoder> blitCommandEncoder = [commandBuffer
+      blitCommandEncoder];
+  [blitCommandEncoder copyFromBuffer:buffer
+      sourceOffset:0
+      sourceBytesPerRow:bytesPerRow
+      sourceBytesPerImage:kBufferSize
+      sourceSize:MTLSizeMake(width, height, 1)
+      toTexture:tex->tex
+      destinationSlice:0
+      destinationLevel:0
+      destinationOrigin:MTLOriginMake(x, y, 0)];
+
+  [blitCommandEncoder endEncoding];
+  [commandBuffer commit];
+  [commandBuffer waitUntilCompleted];
+#else
+  id<MTLTexture> texture = tex->tex;
   [texture replaceRegion:MTLRegionMake2D(x, y, width, height)
              mipmapLevel:0
                withBytes:bytes
              bytesPerRow:bytesPerRow];
+#endif
 
   return 1;
 }
@@ -1681,7 +1758,7 @@ error:
 
     // Clears stencil buffer.
     [_renderEncoder setDepthStencilState:_strokeClearStencilState];
-    //[_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
+    [_renderEncoder setRenderPipelineState:_stencilOnlyPipelineState];
     [_renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                        vertexStart:call->strokeOffset
                        vertexCount:call->strokeCount];
@@ -1722,7 +1799,7 @@ error:
   MTLRenderPipelineColorAttachmentDescriptor* colorAttachmentDescriptor = \
       pipelineStateDescriptor.colorAttachments[0];
   colorAttachmentDescriptor.pixelFormat = pixelFormat;
-  pipelineStateDescriptor.stencilAttachmentPixelFormat = MTLPixelFormatStencil8;
+  pipelineStateDescriptor.stencilAttachmentPixelFormat = kStencilFormat;
   pipelineStateDescriptor.fragmentFunction = _fragmentFunction;
   pipelineStateDescriptor.vertexFunction = _vertexFunction;
   pipelineStateDescriptor.vertexDescriptor = _vertexDescriptor;
@@ -1763,14 +1840,14 @@ error:
   }
   if (_buffers->stencilTexture == nil) {
     MTLTextureDescriptor* stencilTextureDescriptor = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatStencil8
+        texture2DDescriptorWithPixelFormat:kStencilFormat
         width:size->x
         height:size->y
         mipmapped:NO];
-#if TARGET_OS_OSX == 1
-    stencilTextureDescriptor.resourceOptions = MTLResourceStorageModePrivate;
-#endif
     stencilTextureDescriptor.usage = MTLTextureUsageRenderTarget;
+#if TARGET_OS_OSX || TARGET_OS_SIMULATOR
+    stencilTextureDescriptor.storageMode = MTLStorageModePrivate;
+#endif  // TARGET_OS_OSX || TARGET_OS_SIMULATOR
     _buffers->stencilTexture = [_metalLayer.device
         newTextureWithDescriptor:stencilTextureDescriptor];
   }
